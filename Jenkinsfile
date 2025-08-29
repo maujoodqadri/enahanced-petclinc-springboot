@@ -109,12 +109,14 @@ pipeline {
   }
 }
 
-        stage ('Docker Build'){
-            steps {
-                script {
-                    echo 'Docker Build Started'
-                    docker.build("${IMAGE_NAME}:${IMAGE_TAG}")
-      }
-    }
-  }
-}
+        stage ('Docker Build') {
+  steps {
+    script {
+      echo 'Docker Build Started'
+      def img = docker.build("${env.IMAGE_NAME}:${env.IMAGE_TAG}")
+    } // <-- close script
+  }   // <-- close steps
+}     // <-- close stage
+}     // <-- close stages
+}     // <-- close pipeline
+
