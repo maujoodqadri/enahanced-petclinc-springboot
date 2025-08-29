@@ -2,106 +2,115 @@
 
 pipeline {
     agent any
-
     tools {
         maven 'maven'
     }
-
     environment {
-        IMAGE_NAME = 'bkrrajmali/petclinic'
-        IMAGE_TAG = "${env.BUILD_NUMBER}"
-        SCANNER_HOME = tool 'Sonar-scanner'
-        ACR_LOGIN_SERVER = 'dockerregnodejs.azurecr.io'
-        ACR_CREDENTIALS_ID = 'acr-credentials'
+        IMAGE_NAME  ="springbootapp"
+        IMAGE_TAG   ="latest"
+        // ACR_NAME    ="fazalacr101"
+        TENANT_ID   ="c66b6843-a8ca-44e9-b004-e2a01de75ec9"
+        // ACR_LOGIN_SERVER ="${ACR_NAME}.azurecr.io"
+        // FULL_IMAGE_NAME ="${ACR_LOGIN_SERVER}/${IMAGE_NAME}:${IMAGE_TAG}"
     }
-
     stages {
-        stage('Checkout') {
+        stage('Checkout From Git') {
             steps {
-                checkout scm
+                git branch: 'prod', url: 'https://github.com/maujoodqadri/enahanced-petclinc-springboot.git'
             }
-        }
-
-        stage('Build - Maven Tasks in Parallel') {
-            parallel {
-                stage('Maven Test') {
-                    steps {
-                        script {
-                            mvnStage('test')
-                        }
-                    }
-                }
-                stage('Maven Compile') {
-                    steps {
-                        script {
-                            mvnStage('compile')
-                        }
-                    }
-                }
-                stage('Maven Package') {
-                    steps {
-                        script {
-                            mvnStage('package')
-                        }
-                    }
-                }
-            }
-        }
-
-        stage('SonarQube Scan') {
+        }  
+        stage('Maven Validate') {
             steps {
-                script {
-                    sonarScan([
-                        projectKey      : 'bkrrajmali_petclinic',
-                        organization    : 'bkrrajmali',
-                        projectName     : 'petclinic',
-                        exclusions      : '**/trivy-report.txt'
-                    ])
-                }
+                echo "This is Maven Validate Stage"
+                sh 'mvn validate'
             }
-        }
-
-        stage('Quality Gate') {
+        }   
+        stage('Maven Compile') {
             steps {
-                timeout(time: 2, unit: 'MINUTES') {
-                    waitForQualityGate abortPipeline: true
-                }
+                echo "This is Maven Compile Stage"
+                sh 'mvn compile'
             }
-        }
-
-        stage('Docker Build & Push') {
+        } 
+        stage('Sonar Analysis') {
+            environment {
+                SCANNER_HOME = tool 'Sonar-scanner'
+            }
             steps {
-                script {
-                    dockerBuildAndPush(
-                        'petclinic', 
-                        "${env.BUILD_NUMBER}", 
-                        env.ACR_LOGIN_SERVER, 
-                        '', 
-                        env.ACR_CREDENTIALS_ID
-                    )
+                withSonarQubeEnv('sonarserver') {
+                    sh '''
+                        $SCANNER_HOME/bin/sonar-scanner \
+                        -Dsonar.organization=maujoodqadri \
+                        -Dsonar.projectName=SpringBootPet \
+                        -Dsonar.projectKey=maujoodqadri_enahanced-petclinc-springboot \
+                        -Dsonar.java.binaries=./target
+                    '''
                 }
             }
         }
-
-        stage('Trivy Scan') {
+         stage('Maven Package') {
             steps {
-                script {
-                    trivyScan("${IMAGE_NAME}:${IMAGE_TAG}")
-                }
+                echo "This is Maven Package Stage"
+                sh 'mvn package'
             }
         }
+        stage('Build + Test + Sonar (Maven)') {
+            steps {
+                sh 'rm -f .scannerwork/report-task.txt target/sonar/report-task.txt || true'
+                withSonarQubeEnv('sonarserver') {
+                    sh '''
+                        mvn -B clean \
+                          org.jacoco:jacoco-maven-plugin:prepare-agent \
+                          verify sonar:sonar \
+                          -Dsonar.organization=maujoodqadri \
+                          -Dsonar.projectKey=maujoodqadri_enahanced-petclinc-springboot \
+                          -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml
+                    '''
+                }
+            }
+        } 
+        stage('Sonar Quality Gate (poll)') {
+  steps {
+    withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
+      sh '''
+        set -e
+
+        # Use the Maven analysis report (the one with coverage)
+        TASK_FILE=target/sonar/report-task.txt
+        if [ ! -f "$TASK_FILE" ]; then
+          echo "ERROR: $TASK_FILE not found"; ls -la target || true; exit 1
+        fi
+
+        TASK_URL=$(grep -oP "(?<=ceTaskUrl=).*" "$TASK_FILE")
+        echo "Polling SonarCloud task: $TASK_URL"
+
+        # Poll up to 15 minutes (180 * 5s)
+        for i in $(seq 1 180); do
+          RESP=$(curl -s -u "$SONAR_TOKEN:" "$TASK_URL")
+          STATUS=$(echo "$RESP" | jq -r '.task.status')
+          echo "Compute Engine status: $STATUS"
+          if [ "$STATUS" = "SUCCESS" ]; then
+            ANALYSIS_ID=$(echo "$RESP" | jq -r '.task.analysisId'); break
+          elif [ "$STATUS" = "FAILED" ]; then
+            echo "Sonar analysis FAILED"; exit 1
+          fi
+          sleep 5
+        done
+
+        [ -n "$ANALYSIS_ID" ] || { echo "Timed out waiting for analysis"; exit 1; }
+
+        QG=$(curl -s -u "$SONAR_TOKEN:" \
+          "https://sonarcloud.io/api/qualitygates/project_status?analysisId=$ANALYSIS_ID" \
+          | jq -r '.projectStatus.status')
+
+        echo "Quality Gate: $QG"
+        [ "$QG" = "OK" ] || { echo "Quality Gate FAILED: $QG"; exit 1; }
+      '''
     }
-
-    post {
-        success {
-            script {
-                log("Petclinic Pipeline completed successfully")
-            }
-        }
-        failure {
-            script {
-                log("Petclinic Pipeline failed — check logs")
-            }
-        }
-    }
+  }
 }
+
+        stage ('Docker Build'){
+            steps {
+                script {
+                    echo 'Docker Build Started'
+                    docker.build("${IMAGE_NAME}:${IMAGE_TAG}")
