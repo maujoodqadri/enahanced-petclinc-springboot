@@ -116,4 +116,5 @@ pipeline {
                     docker.build("${IMAGE_NAME}:${IMAGE_TAG}")
       }
     }
+  }
 }
